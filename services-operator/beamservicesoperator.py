@@ -2,6 +2,8 @@ import os
 import ftplib
 import time
 import uuid
+import json
+import asyncio
 
 import kopf
 import requests
@@ -13,39 +15,76 @@ FLINK_URL = f"http://flink-jobmanager-rest.{namespace}:8081"
 JOB_STATUS_UNKNOWN = "UNKNOWN"
 
 @kopf.on.create("oisp.org", "v1", "beamservices")
-def create(body, spec, **kwargs):
+def create(body, patch, spec, **kwargs):
     kopf.info(body, reason="Creating", message="Creating beamservices"+str(spec))
+    patch.status['jobCreating'] = False
+    patch.status['jobCreated'] = False
+    patch.status['deploying'] = False
+    patch.status['deployed'] = False
+    patch.status['jobStatus'] = None
+    patch.status['jobId'] = None
+    patch.status['jarId'] = None
     return {"createdOn": str(time.time())}
 
 
 # TODO make this async
-@kopf.timer("oisp.org", "v1", "beamservices", interval=1)
-def updates(stopped, patch, logger, body, spec, status, **kwargs):
-    update_status = status.get("updates")
-    if update_status is None:
-        kopf.info(body, reason="Status None", message="Status is none")
-        return {"deployed": False, "jobCreated": False, "jobStatus": {}}
-    if not update_status.get("deployed"):
+@kopf.timer("oisp.org", "v1", "beamservices", interval=5)
+def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
+    if status.get('deployed') is None:
+        kopf.info(body, reason="Status None", message="Object not created")
+        raise Exception("Object no created")
+    if not status.get("deployed"):
         jar_id = deploy(body, spec)
-        return {"deployed": True, "jarId": jar_id}
-    elif not update_status.get("jobCreated"):
-        job_id = create_job(body, spec, update_status["jarId"])
-        if job_id is not None:
-            return {"jobCreated": True, "jobId": job_id}
-        else:
-            return
-    try:
-        job_status = requests.get(
-            f"{FLINK_URL}/jobs/{update_status['jobId']}").json()
-        errors = job_status.get("errors", [])
-        print(errors)
-        if f"Job {update_status['jobId']} not found" in errors:
-            kopf.info(body, reason="Job not found", message="Job not found, triggering redeploy.")
-            return {"deployed": False, "jobCreated": False, "jobStatus": {}, "redeployed": True}
-    except (ConnectionRefusedError, requests.ConnectionError):
-        return {"jobStatus": JOB_STATUS_UNKNOWN}
-    return {"jobStatus": job_status}
+        patch.status['deployed'] = True
+        patch.status['jarId'] = jar_id
+        return {"updatedOn": str(time.time())}
+    elif not status.get("jobCreated") and not status.get("jobCreating"):
+        kopf.info(body, reason="JobSubmitting", message="Requesting job submission Task")
+        patch.status['jobCreating'] = True
+        return {"updatedOn": str(time.time())}
+    elif status.get("jobCreating"):
+        kopf.info(body, reason="JobSubmitting", message="Waiting job submission Task")
+        return
+    
+    kopf.info(body, reason="Monitoring", message="Checking Flink state.")
+    job_status = requests.get(
+        f"{FLINK_URL}/jobs/{status.get('jobId')}").json()
+    errors = job_status.get("errors", [])
+    print("hello" + str(status.get('jobId')))
+    if not isinstance(errors, list):
+        matching = f"Job {status.get('jobId')} not found" in errors
+    else:
+        matching = [element for element in errors if (f"Job {status.get('jobId')} not found" in element)]
+    print("element " + str(bool(matching)))
+    if bool(matching):
+        kopf.info(body, reason="Job not found", message="Job not found, triggering redeploy.")
+        patch.status['deployed'] = False
+        patch.status['jobCreated'] = False
+        return {"updatedOn": str(time.time())}
+    #recreate = f"FAILED" in job_status.get("state")
+    #print("Marcel532 " + str(recreate) + job_status.get("state"))
+    #if recreate:
+    #    kopf.info(body, reason="Job failed", message="Job not found, triggering recreation.")
+    #    return {"submitting": True}
+    #except (ConnectionRefusedError, requests.ConnectionError):
+    #    return {"jobStatus": JOB_STATUS_UNKNOWN}
+    return
 
+@kopf.on.field("oisp.org", "v1", "beamservices", field="status.jobCreating")
+def jobCreating(old, new, status, patch, body, spec, **kwargs):
+    kopf.info(body, reason="JobCreating", message="JobCreating triggered with value " + str(new))
+    job_id = None
+    if new:
+        try:
+            job_id = create_job(body, spec, status.get("jarId"))
+        except:
+            raise kopf.TemporaryError("Exception while creating a job. Try later again.", delay=5)
+        if job_id is not None:
+            patch.status['jobId'] = job_id
+            patch.status['jobCreating'] = False
+            patch.status['jobCreated'] = True
+            return {"updatedOn": str(time.time())}
+        raise kopf.TemporaryError("No job returned. Try later again.", delay=5)
 
 @kopf.on.delete("oisp.org", "v1", "beamservices")
 def delete(body, **kwargs):
@@ -123,6 +162,7 @@ def build_args(args_dict, tokens):
 
 
 def create_job(body, spec, jar_id):
+    kopf.info(body, reason="createJob Task", message="starting job with jar_id " + str(jar_id))
     entry_class = spec["entryClass"]
     tokens = util.get_tokens(spec.get("tokens", []))
     kopf.info(body, reason="Got tokens", message=str(tokens))
