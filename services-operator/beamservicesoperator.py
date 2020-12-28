@@ -1,4 +1,5 @@
 import os
+import os.path
 import ftplib
 import time
 import uuid
@@ -24,26 +25,28 @@ def create(body, patch, spec, **kwargs):
     patch.status['jobStatus'] = None
     patch.status['jobId'] = None
     patch.status['jarId'] = None
+    patch.status['jarPath'] = None
     return {"createdOn": str(time.time())}
 
-
-# TODO make this async
 @kopf.timer("oisp.org", "v1", "beamservices", interval=5)
 def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
     if status.get('deployed') is None:
         kopf.info(body, reason="Status None", message="Object not created")
         raise Exception("Object no created")
-    if not status.get("deployed"):
-        jar_id = deploy(body, spec)
-        patch.status['deployed'] = True
-        patch.status['jarId'] = jar_id
+    if not status.get("deployed") and not status.get("deploying"):
+        kopf.info(body, reason="JarDeploying", message="Requesting to deploy jar")
+        patch.status['deploying'] = True
         return {"updatedOn": str(time.time())}
+        #jar_id = deploy(body, spec)
+        #patch.status['deployed'] = True
+        #patch.status['jarId'] = jar_id
+        #return {"updatedOn": str(time.time())}
     elif not status.get("jobCreated") and not status.get("jobCreating"):
         kopf.info(body, reason="JobSubmitting", message="Requesting job submission Task")
         patch.status['jobCreating'] = True
         return {"updatedOn": str(time.time())}
-    elif status.get("jobCreating"):
-        kopf.info(body, reason="JobSubmitting", message="Waiting job submission Task")
+    elif status.get("jobCreating") or status.get("deploying"):
+        kopf.info(body, reason="JobSubmitting", message="Waiting for ongoing Task")
         return
     
     kopf.info(body, reason="Monitoring", message="Checking Flink state.")
@@ -61,13 +64,6 @@ def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
         patch.status['deployed'] = False
         patch.status['jobCreated'] = False
         return {"updatedOn": str(time.time())}
-    #recreate = f"FAILED" in job_status.get("state")
-    #print("Marcel532 " + str(recreate) + job_status.get("state"))
-    #if recreate:
-    #    kopf.info(body, reason="Job failed", message="Job not found, triggering recreation.")
-    #    return {"submitting": True}
-    #except (ConnectionRefusedError, requests.ConnectionError):
-    #    return {"jobStatus": JOB_STATUS_UNKNOWN}
     return
 
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.jobCreating")
@@ -85,6 +81,29 @@ def jobCreating(old, new, status, patch, body, spec, **kwargs):
             patch.status['jobCreated'] = True
             return {"updatedOn": str(time.time())}
         raise kopf.TemporaryError("No job returned. Try later again.", delay=5)
+
+@kopf.on.field("oisp.org", "v1", "beamservices", field="status.deploying")
+def deploying(old, new, status, patch, body, spec, **kwargs):
+    kopf.info(body, reason="deploying", message="deploying triggered with value " + str(new))
+    jar_id = None
+    if new:
+        jar_path = status.get('jarPath')
+        if not jar_path:
+            jar_path = fetch_jar(body, spec)
+        elif not os.path.exists(jar_path):
+            patch.status['jarPath'] = None
+            patch.status['jarId'] = None
+            raise kopf.TemporaryError("jar_path not found on local filesystem. (Has operator been restarted?). Will try to fix later.", delay=5)    
+        if jar_path is not None:
+            patch.status['jarPath'] = jar_path
+            jar_id = deploy(body, spec, jar_path)
+            if jar_id is not None:
+                patch.status['deployed'] = True
+                patch.status['deploying'] = False
+                patch.status['jarId'] = jar_id
+                return {"updatedOn": str(time.time())}
+        raise kopf.TemporaryError("No jar_id or jar_path returned. Try later again.", delay=5)
+
 
 @kopf.on.delete("oisp.org", "v1", "beamservices")
 def delete(body, **kwargs):
@@ -118,9 +137,8 @@ def download_file_via_ftp(url, username, password):
             ftp.retrbinary(f"RETR {remote_path}", f.write)
     return local_path
 
-def deploy(body, spec):
-    # TODO Create schema for spec in CRD
-#    url = spec["url"]
+
+def fetch_jar(body, spec):
     package = spec["package"]
     url = package["url"]
     kopf.info(body, reason="Jar download",
@@ -132,7 +150,11 @@ def deploy(body, spec):
     else:
         kopf.error(body, reason="BeamDeploymentFailed",
                    message="Invalid url (must start with http or ftp)")
-        raise kopf.PermanentError("Jar download failed")
+        raise kopf.PermanentError("Jar download failed due to wrong url format.")
+    return jarfile_path
+
+def deploy(body, spec, jarfile_path):
+    # TODO Create schema for spec in CRD
     response = requests.post(
         f"{FLINK_URL}/jars/upload", files={"jarfile": open(jarfile_path, "rb")})
     if response.status_code != 200:
