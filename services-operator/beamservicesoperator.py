@@ -7,17 +7,27 @@ import json
 import asyncio
 
 import kopf
+import logging
 import requests
 
 import util
 
 namespace = os.environ["OISP_NAMESPACE"]
-FLINK_URL = f"http://flink-jobmanager-rest.{namespace}:8081"
+FLINK_URL = os.environ["OISP_FLINK_REST"]
 JOB_STATUS_UNKNOWN = "UNKNOWN"
+MAX_RETRY = os.getenv("OISP_BEAMOPERATOR_RETRY") or 20
+
+@kopf.on.startup()
+def configure(settings: kopf.OperatorSettings, **_):
+    settings.posting.level = logging.INFO
 
 @kopf.on.create("oisp.org", "v1", "beamservices")
 def create(body, patch, spec, **kwargs):
     kopf.info(body, reason="Creating", message="Creating beamservices"+str(spec))
+    resetStatus(patch)
+    return {"createdOn": str(time.time())}
+
+def resetStatus(patch):
     patch.status['jobCreating'] = False
     patch.status['jobCreated'] = False
     patch.status['deploying'] = False
@@ -26,10 +36,16 @@ def create(body, patch, spec, **kwargs):
     patch.status['jobId'] = None
     patch.status['jarId'] = None
     patch.status['jarPath'] = None
-    return {"createdOn": str(time.time())}
+
+def deleteJar(status):
+    jar_path = status.get("jarPath")
+    if jar_path is not None:
+        if os.path.exist(jar_path):
+            os.remove(jar_path)
 
 @kopf.timer("oisp.org", "v1", "beamservices", interval=5)
 def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
+    """Monitor operator states and Flink state regularly. Set the respective triggers if problems are found."""
     if status.get('deployed') is None:
         kopf.info(body, reason="Status None", message="Object not created")
         raise Exception("Object no created")
@@ -37,10 +53,6 @@ def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
         kopf.info(body, reason="JarDeploying", message="Requesting to deploy jar")
         patch.status['deploying'] = True
         return {"updatedOn": str(time.time())}
-        #jar_id = deploy(body, spec)
-        #patch.status['deployed'] = True
-        #patch.status['jarId'] = jar_id
-        #return {"updatedOn": str(time.time())}
     elif not status.get("jobCreated") and not status.get("jobCreating"):
         kopf.info(body, reason="JobSubmitting", message="Requesting job submission Task")
         patch.status['jobCreating'] = True
@@ -48,17 +60,16 @@ def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
     elif status.get("jobCreating") or status.get("deploying"):
         kopf.info(body, reason="JobSubmitting", message="Waiting for ongoing Task")
         return
-    
+
     kopf.info(body, reason="Monitoring", message="Checking Flink state.")
     job_status = requests.get(
         f"{FLINK_URL}/jobs/{status.get('jobId')}").json()
     errors = job_status.get("errors", [])
-    print("hello" + str(status.get('jobId')))
     if not isinstance(errors, list):
         matching = f"Job {status.get('jobId')} not found" in errors
     else:
         matching = [element for element in errors if (f"Job {status.get('jobId')} not found" in element)]
-    print("element " + str(bool(matching)))
+    #print("matching " + str(matching) + " jobId " + status.get('jobId') + "errors " + str(errors))
     if bool(matching):
         kopf.info(body, reason="Job not found", message="Job not found, triggering redeploy.")
         patch.status['deployed'] = False
@@ -67,8 +78,13 @@ def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
     return
 
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.jobCreating")
-def jobCreating(old, new, status, patch, body, spec, **kwargs):
-    kopf.info(body, reason="JobCreating", message="JobCreating triggered with value " + str(new))
+def jobCreating(old, new, status, patch, body, spec, retry, **kwargs):
+    """Submit jobs to Flink when status.jobCreating is triggered."""
+    if retry > MAX_RETRY:
+        kopf.warn(body, reason="jobCreating", message="Handler reached maximum retries. Reset states.")
+        deleteJar(status)
+        resetStates(patch)
+        return {"updatedOn": str(time.time())}
     job_id = None
     if new:
         try:
@@ -83,17 +99,25 @@ def jobCreating(old, new, status, patch, body, spec, **kwargs):
         raise kopf.TemporaryError("No job returned. Try later again.", delay=5)
 
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.deploying")
-def deploying(old, new, status, patch, body, spec, **kwargs):
-    kopf.info(body, reason="deploying", message="deploying triggered with value " + str(new))
+def deploying(old, new, status, patch, body, spec, retry, **kwargs):
+    """Deploy files when triggerd by status.deploying."""
+    if retry > MAX_RETRY:
+        kopf.warn(body, reason="deploying", message="Handler reached maximum retries. Reset states.")
+        deleteJar(status)
+        resetStates(patch)
+        return {"updatedOn": str(time.time())}
     jar_id = None
     if new:
         jar_path = status.get('jarPath')
         if not jar_path:
             jar_path = fetch_jar(body, spec)
         elif not os.path.exists(jar_path):
+            kopf.info(body, reason="JarFile", message="jar_path " + str(jar_path) + " does not exist. Resetting deploying. Will fix later.")
             patch.status['jarPath'] = None
             patch.status['jarId'] = None
-            raise kopf.TemporaryError("jar_path not found on local filesystem. (Has operator been restarted?). Will try to fix later.", delay=5)    
+            patch.status['deployed'] = False
+            patch.status['deploying'] = False
+            return {"updatedOn": str(time.time())}
         if jar_path is not None:
             patch.status['jarPath'] = jar_path
             jar_id = deploy(body, spec, jar_path)
@@ -139,6 +163,7 @@ def download_file_via_ftp(url, username, password):
 
 
 def fetch_jar(body, spec):
+    """Fetch the file from the spec.package"""
     package = spec["package"]
     url = package["url"]
     kopf.info(body, reason="Jar download",
@@ -148,7 +173,7 @@ def fetch_jar(body, spec):
     elif url.startswith("ftp"):
         jarfile_path = download_file_via_ftp(url, package["username"], package["password"])
     else:
-        kopf.error(body, reason="BeamDeploymentFailed",
+        kopf.warn(body, reason="BeamDeploymentFailed",
                    message="Invalid url (must start with http or ftp)")
         raise kopf.PermanentError("Jar download failed due to wrong url format.")
     return jarfile_path
@@ -158,7 +183,7 @@ def deploy(body, spec, jarfile_path):
     response = requests.post(
         f"{FLINK_URL}/jars/upload", files={"jarfile": open(jarfile_path, "rb")})
     if response.status_code != 200:
-        kopf.error(body, reason="BeamDeploymentFailed",
+        kopf.warn(body, reason="BeamDeploymentFailed",
                    message="Could not submit jar, server returned:" +
                    response.request.body.decode("utf-8"))
         raise kopf.TemporaryError("Jar submission failed.", delay=10)
