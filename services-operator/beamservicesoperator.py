@@ -81,25 +81,34 @@ def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
 
     # Actual monitoring part.
     # Try to get status of a job. React only if Job xyz not found is showing up explicit in the error message
-    # Reset deployed and jobcreated state to None
+    # Reset deployed and jobcreated state to None   
     kopf.info(body, reason="Monitoring", message="Checking Flink state.")
     try:
-        print("hello world " + str(status.get('jobId')))
         job_status = requests.get(
             f"{FLINK_URL}/jobs/{status.get('jobId')}")
-        errors = job_status.json().get("errors", [])
         status_code = job_status.status_code
-        print("body: " + str(json.dumps(job_status.json())))
-        print("status_code " + str(status_code))
-        if not isinstance(errors, list):
-            matching = f"Job {status.get('jobId')} not found" in errors
-        else:
-            matching = [element for element in errors if (f"Job {status.get('jobId')} not found" in element)]
-        if bool(matching):
+        
+        print("status_code " + str(status_code), flush=True)
+        if status_code == 404:
+            #errors = job_status.json().get("errors", [])
+            #if not isinstance(errors, list):
+            #    matching = f"Job {status.get('jobId')} not found" in errors
+            #else:
+            #    matching = [element for element in errors if (f"Job {status.get('jobId')} not found" in element)]
+            #if bool(matching):
             kopf.info(body, reason="Job not found", message="Job not found, triggering redeploy.")
             patch.status['deployed'] = False
             patch.status['jobCreated'] = False
             return {"updatedOn": str(datetime.now())}
+        elif status_code == 200:
+            pipeline_state = job_status.json().get("state")
+            if pipeline_state is not None:
+                patch.status['state'] = pipeline_state
+            if pipeline_state == 'FAILED':
+                cancel_job(body, status)
+                delete_jar(status)
+                reset_status(patch)
+                patch.status['state'] = "RESTARTING"            
     except requests.exceptions.RequestException as e:
             kopf.info(body, reason="monitor job", message="Exception while trying to query job state. Reason: " + str(e))
     return
@@ -121,7 +130,7 @@ def reset(old, new, status, patch, body, spec, retry, **kwargs):
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.jobCreating")
 def jobCreating(old, new, status, patch, body, spec, retry, **kwargs):
     """Submit jobs to Flink when status.jobCreating is triggered."""
-    kopf.info(body, reason="debugging", message="Handler enters jobCreating.")
+    kopf.info(body, reason="debugging", message="Handler enters jobCreating with status " + str(new))
     if retry > MAX_RETRY:
         kopf.info(body, reason="jobCreating", message="Handler reached maximum retries. Reset states.")
         cancel_job(body, status)
@@ -141,7 +150,7 @@ def jobCreating(old, new, status, patch, body, spec, retry, **kwargs):
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.deploying")
 def deploying(old, new, status, patch, body, spec, retry, **kwargs):
     """Deploy files when triggerd by status.deploying."""
-    kopf.info(body, reason="debugging", message="Handler enters deploying.")
+    kopf.info(body, reason="debugging", message="Handler enters deploying with status " + str(new))
     if retry > MAX_RETRY:
         kopf.info(body, reason="deploying", message="Handler reached maximum retries. Reset states.")
         cancel_job(body, status)
@@ -151,15 +160,18 @@ def deploying(old, new, status, patch, body, spec, retry, **kwargs):
     jar_id = None
     if new:
         jar_path = status.get('jarPath')
-        if not jar_path:
-            jar_path = fetch_jar(body, spec)
-        elif not os.path.isfile(jar_path):
-            kopf.info(body, reason="JarFile", message="jar_path " + str(jar_path) + " does not exist. Resetting deploying. Will fix later.")
+        if jar_path is not None:
+            delete_jar(status)
+            jar_path = None
             patch.status['jarPath'] = None
-            patch.status['jarId'] = None
-            patch.status['deployed'] = False
-            patch.status['deploying'] = False
-            return {"updatedOn": str(datetime.now())}
+        jar_path = fetch_jar(body, spec)
+        #elif not os.path.isfile(jar_path):
+        #    kopf.info(body, reason="JarFile", message="jar_path " + str(jar_path) + " does not exist. Resetting deploying. Will fix later.")
+        #    patch.status['jarPath'] = None
+        #    patch.status['jarId'] = None
+        #    patch.status['deployed'] = False
+        #    patch.status['deploying'] = False
+        #    return {"updatedOn": str(datetime.now())}
         if jar_path is not None:
             patch.status['jarPath'] = jar_path
             jar_id = deploy(body, spec, jar_path)
