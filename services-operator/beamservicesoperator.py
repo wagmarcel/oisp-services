@@ -18,6 +18,9 @@ FLINK_URL = os.environ["OISP_FLINK_REST"]
 JOB_STATUS_UNKNOWN = "UNKNOWN"
 MAX_RETRY = os.getenv("OISP_BEAMOPERATOR_RETRY") or 20
 
+####################
+# Operator functions
+####################
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
     settings.posting.level = logging.INFO
@@ -27,22 +30,6 @@ def create(body, patch, spec, **kwargs):
     kopf.info(body, reason="Creating", message="Creating beamservices"+str(spec))
     reset_status(patch)
     return {"createdOn": str(datetime.now())}
-
-def reset_status(patch):
-    patch.status['jobCreating'] = False
-    patch.status['jobCreated'] = False
-    patch.status['deploying'] = False
-    patch.status['deployed'] = False
-    patch.status['jobStatus'] = None
-    patch.status['jobId'] = None
-    patch.status['jarId'] = None
-    patch.status['jarPath'] = None
-
-def delete_jar(status):
-    jar_path = status.get("jarPath")
-    if jar_path is not None:
-        if os.path.isfile(jar_path):
-            os.remove(jar_path)
 
 @kopf.timer("oisp.org", "v1", "beamservices", interval=5)
 def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
@@ -105,6 +92,7 @@ def monitoring(stopped, patch, logger, body, spec, status, **kwargs):
                 delete_jar(status)
                 reset_status(patch)
                 patch.status['state'] = "RESETTING BY OPERATOR"
+                return {"updatedOn": str(datetime.now())}
     except requests.exceptions.RequestException as e:
             kopf.info(body, reason="monitor job", message="Exception while trying to query job state. Reason: " + str(e))
     return
@@ -126,7 +114,8 @@ def reset(old, new, status, patch, body, spec, retry, **kwargs):
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.jobCreating")
 def jobCreating(old, new, status, patch, body, spec, retry, **kwargs):
     """Submit jobs to Flink when status.jobCreating is triggered by monitor."""
-    kopf.info(body, reason="debugging", message="Handler enters jobCreating with status " + str(new))
+    kopf.info(body, reason="debugging", message="Handler enters jobCreating with status " +\
+        str(new) + ", previous status " + str(old))
     if retry > MAX_RETRY:
         kopf.info(body, reason="jobCreating", message="Handler reached maximum retries. Reset states.")
         cancel_job(body, status)
@@ -146,7 +135,8 @@ def jobCreating(old, new, status, patch, body, spec, retry, **kwargs):
 @kopf.on.field("oisp.org", "v1", "beamservices", field="status.deploying")
 def deploying(old, new, status, patch, body, spec, retry, **kwargs):
     """Deploy files when triggered by monitor."""
-    kopf.info(body, reason="debugging", message="Handler enters deploying with status " + str(new))
+    kopf.info(body, reason="debugging", message="Handler enters deploying with status " +\
+        str(new) + ", previous status " + str(old))
     if retry > MAX_RETRY:
         kopf.info(body, reason="deploying", message="Handler reached maximum retries. Reset states.")
         cancel_job(body, status)
@@ -171,7 +161,14 @@ def deploying(old, new, status, patch, body, spec, retry, **kwargs):
                 return {"updatedOn": str(datetime.now())}
         raise kopf.TemporaryError("No jar_id or jar_path returned. Try later again.", delay=5)
 
+@kopf.on.delete("oisp.org", "v1", "beamservices")
+def delete(body, status, **kwargs):
+    cancel_job(body, status)
+    delete_jar(status)
 
+####################
+# helper functions
+####################
 def cancel_job(body, status):
     job_id = status.get("jobId")
     if job_id is not None:
@@ -182,12 +179,6 @@ def cancel_job(body, status):
             kopf.info(body, reason="cancel job", message="Exception after trying to cancel a job. Reason: " + str(e))
         if resp.status_code is not 200:
             kopf.info(body, reason="cancel job", message="Could not cancel job. Reason: " + str(resp.text))
-
-@kopf.on.delete("oisp.org", "v1", "beamservices")
-def delete(body, status, **kwargs):
-    cancel_job(body, status)
-    delete_jar(status)
-
 
 def download_file_via_http(url):
     """Download the file and return the saved path."""
@@ -294,3 +285,19 @@ def check_free_slots(body):
             return free_slots
     except requests.exceptions.RequestException as e:
             kopf.info(body, reason="jobmanager overview", message="Exception while trying to check cluster state. Reason: " + str(e))
+
+def reset_status(patch):
+    patch.status['jobCreating'] = False
+    patch.status['jobCreated'] = False
+    patch.status['deploying'] = False
+    patch.status['deployed'] = False
+    patch.status['jobStatus'] = None
+    patch.status['jobId'] = None
+    patch.status['jarId'] = None
+    patch.status['jarPath'] = None
+
+def delete_jar(status):
+    jar_path = status.get("jarPath")
+    if jar_path is not None:
+        if os.path.isfile(jar_path):
+            os.remove(jar_path)
