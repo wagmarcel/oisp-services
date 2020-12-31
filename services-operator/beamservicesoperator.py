@@ -41,14 +41,17 @@ async def updates(stopped, patch, logger, body, spec, status, **kwargs):
         job_status = requests.get(
             f"{FLINK_URL}/jobs/{update_status['jobId']}")
         status_code = job_status.status_code
+        jar_file = status.get("jarfile")
         if status_code == 404:
             kopf.info(body, reason="Job not found", message="Job not found, triggering redeploy.")
-            delete_jar(body, status, patch)
+            delete_jar(body, jar_file)
+            patch.status["jarfile"] = None
             return {"deployed": False, "jobCreated": False, "jobStatus": {}, "redeployed": True}
         if status_code == 200 and job_status.json().get("state") == JOB_STATUS_FAILED:
             patch.status['jobState'] = JOB_STATUS_FIXING
 
-            delete_jar(body, status, patch)
+            delete_jar(body, jar_file)
+            patch.status["jarfile"] = None
             return {"deployed": False, "jobCreated": False, "jobStatus": {}, "redeployed": True}
     except (ConnectionRefusedError, requests.ConnectionError):
         patch.status['jobState'] = JOB_STATUS_UNKNOWN
@@ -103,13 +106,16 @@ def deploy(body, spec, patch):
     else:
         raise kopf.PermanentError("Jar download failed. Invalid url (must start with http or ftp)")
     patch.status["jarfile"] = jarfile_path
-    response = requests.post(
-        f"{FLINK_URL}/jars/upload", files={"jarfile": open(jarfile_path, "rb")})
-    if response.status_code != 200:
-        raise kopf.TemporaryError("Jar submission failed. Status code: " + str(response.status_code), delay=10)
-
+    try:
+        response = requests.post(
+            f"{FLINK_URL}/jars/upload", files={"jarfile": open(jarfile_path, "rb")})
+        if response.status_code != 200:
+            delete_jar(body, jarfile_path)
+            raise kopf.TemporaryError(f"Jar submission failed. Status code: {response.status_code}", delay=10) 
+    except requests.exceptions.RequestException as e:
+        delete_jar(body, jarfile_path)
+        raise kopf.TemporaryError(f"Jar submission failed. Error: {e}", delay=10)
     jar_id = response.json()["filename"].split("/")[-1]
-
     kopf.info(body, reason="BeamDeploymentSuccess",
               message=f"Submitted jar with id: {jar_id}")
     return jar_id
@@ -147,16 +153,17 @@ def create_job(body, spec, jar_id):
     kopf.info(body, reason="Job created", message=f"Job id: {job_id}")
     return job_id
 
-def delete_jar(body, status, patch):
-    jar_path = status.get("jarfile")
+def delete_jar(body, jar_path):
     print(f"Marcel352 {jar_path}", flush=True)
     if jar_path is not None:
         kopf.info(body, reason="Jar delete", message=f"Trying to delete file: {jar_path}")
         if os.path.isfile(jar_path):
             print(f"Marcel353 {jar_path}", flush=True)
-            os.remove(jar_path)
+            try:
+                os.remove(jar_path)
+            except OSError as e:
+                print(f"Marcel354 {jar_path}, {e}", flush=True)
             kopf.info(body, reason="Jar deleted", message=f"Jar file: {jar_path}")
-            patch.status["jarfile"] = None
 
 
 #def cancel_job(body, status):
