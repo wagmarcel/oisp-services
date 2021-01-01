@@ -3,7 +3,7 @@ import os.path
 import ftplib
 import time
 import uuid
-
+import re
 import kopf
 import requests
 
@@ -22,41 +22,71 @@ def create(body, spec, patch, **kwargs):
 
 
 # TODO make this async
-@kopf.timer("oisp.org", "v1", "beamservices", interval=5)
+@kopf.timer("oisp.org", "v1", "beamservices", interval=10, idle=5)
 async def updates(stopped, patch, logger, body, spec, status, **kwargs):
     update_status = status.get("updates")
     if update_status is None:
         kopf.info(body, reason="Status None", message="Status is none")
-        return {"deployed": False, "jobCreated": False, "jobStatus": {}}
+        return {"deployed": False, "jobCreated": False}
     if not update_status.get("deployed"):
+        # try to delete old jars if existing
+        jar_file = status.get("jarfile")
+        delete_jar(body, jar_file)
+        patch.status["jarfile"] = None
+        # Now try to deploy new one
         jar_id = deploy(body, spec, patch)
         return {"deployed": True, "jarId": jar_id}
     elif not update_status.get("jobCreated"):
+        # before creating job, check whether jobmanager is ready
+        # sometimes if it is not ready, deployments are failing and
+        # this leads to LONG timeout until all is running again
+        if check_free_slots(body) == 0:
+            return
         job_id = create_job(body, spec, update_status["jarId"])
         if job_id is not None:
             return {"jobCreated": True, "jobId": job_id}
         else:
-            return
+            # something is wrong try everything again
+            return {"deployed": False, "jobCreated": False} 
+    # check if job exists. If it exists, check whether the state is FAILED
+    # all other states should be handled by jobmanager
+    job_status = JOB_STATUS_UNKNOWN
     try:
-        job_status = requests.get(
-            f"{FLINK_URL}/jobs/{update_status['jobId']}")
-        status_code = job_status.status_code
-        jar_file = status.get("jarfile")
-        if status_code == 404:
-            kopf.info(body, reason="Job not found", message="Job not found, triggering redeploy.")
-            delete_jar(body, jar_file)
-            patch.status["jarfile"] = None
-            return {"deployed": False, "jobCreated": False, "jobStatus": {}, "redeployed": True}
-        if status_code == 200 and job_status.json().get("state") == JOB_STATUS_FAILED:
-            patch.status['jobState'] = JOB_STATUS_FIXING
-
-            delete_jar(body, jar_file)
-            patch.status["jarfile"] = None
-            return {"deployed": False, "jobCreated": False, "jobStatus": {}, "redeployed": True}
+        jobs_request = requests.get(
+            f"{FLINK_URL}/jobs").json()
+        # check whether job is in the list
+        jobs = jobs_request.get("jobs", [])
+        job_id = update_status.get("jobId")
+        # if we have a job_id, check wether it is running
+        need_job_restart = True
+        for element in jobs:
+            if element['id'] == job_id:
+                if element['status'] != JOB_STATUS_FAILED:
+                    # job exists but failed
+                    # for all other states, assume that jobmanager is taking
+                    # care for restarting
+                    # TODO consider checking CANCELLED state as well 
+                    need_job_restart = False
+                    job_status = element['status']
+                continue
+            # Make sure that there are no old artefacts
+            # i.e. jobs with the resource prefix but not handled by us anylonger
+            # First get detail of the job
+            job_request = requests.get(
+                f"{FLINK_URL}/jobs/{element['id']}").json()
+            job_name = job_request.get("name")
+            # cancel if it has the resource prefix
+            # Hmm, but what is the jobname prefix? Assumption: lowercased entry class name
+            name = get_jobname_prefix(body, spec)
+            if name is not None and job_name.startswith(name):
+                cancel_job(body, element['id'])
+        if need_job_restart:
+            return {"deployed": False, "jobCreated": False, "redeployed": True}
     except (ConnectionRefusedError, requests.ConnectionError):
-        patch.status['jobState'] = JOB_STATUS_UNKNOWN
+        patch.status['jobState'] = job_status
         return
-    patch.status['jobState'] = job_status.json().get("state")
+
+    patch.status['jobState'] = job_status
     return #{"jobStatus": job_status.json().get("state")}
 
 
@@ -92,9 +122,9 @@ def download_file_via_ftp(url, username, password):
             ftp.retrbinary(f"RETR {remote_path}", f.write)
     return local_path
 
+
 def deploy(body, spec, patch):
     # TODO Create schema for spec in CRD
-#    url = spec["url"]
     package = spec["package"]
     url = package["url"]
     kopf.info(body, reason="Jar download",
@@ -146,37 +176,45 @@ def create_job(body, spec, jar_id):
                                    "programArgs": args})
     if response.status_code != 200:
         kopf.info(body, reason="BeamExecutionFailed",
-                  message="Could not run job, server returned:\n" +
-                  response.content.decode("utf-8"))
+                  message=f"Could not run job, server returned: {response.status_code}")
         return None
     job_id = response.json().get("jobid")
     kopf.info(body, reason="Job created", message=f"Job id: {job_id}")
     return job_id
 
 def delete_jar(body, jar_path):
-    print(f"Marcel352 {jar_path}", flush=True)
     if jar_path is not None:
-        kopf.info(body, reason="Jar delete", message=f"Trying to delete file: {jar_path}")
         if os.path.isfile(jar_path):
-            print(f"Marcel353 {jar_path}", flush=True)
             try:
                 os.remove(jar_path)
             except OSError as e:
-                print(f"Marcel354 {jar_path}, {e}", flush=True)
+                kopf.info(body, reason="Jar deleting", message=f"Could not delte jar file: {e}")
             kopf.info(body, reason="Jar deleted", message=f"Jar file: {jar_path}")
 
 
-#def cancel_job(body, status):
-#    update_status = status.get("updates")
-#    if not update_status:
-#        return
-#    if update_status.get("jobId"):
-#        kopf.info(body, reason="cancel job", message="Trying to cancel job " + update_status.get("jobId"))
-#        try:
-#            resp = requests.patch(
-#                f"{FLINK_URL}/jobs/{update_status['jobId']}")
-#        except requests.exceptions.RequestException as e:
-#            kopf.info(body, reason="cancel job", message="Exception while trying to cancel a job. Reason: " + str(e))
-#            return
-#        if resp.status_code != 200:
-#            kopf.info(body, reason="cancel job", message="Could not cancel job. Reason: " + str(resp.text))
+def check_free_slots(body):
+    try:
+        response = requests.get(f"{FLINK_URL}/overview")
+        if response.status_code == 200:
+            free_slots = response.json().get("slots-available")
+            return free_slots
+    except requests.exceptions.RequestException as e:
+            kopf.info(body, reason="jobmanager overview", message="Exception while trying to check cluster state. Reason: " + str(e))
+            return 0
+
+def cancel_job(body, job_id):
+    try:
+        response = requests.get(f"{FLINK_URL}/jobs/{job_id}")
+        if response.status_code != 202:
+            raise kopf.TemporaryError("Could not cancel job from cluster", delay=5)
+    except requests.exceptions.RequestException as e:
+        raise kopf.TemporaryError("Could not cancel job from cluster: {e}", delay=5)
+
+def get_jobname_prefix(body, spec):
+    prefix_match = re.compile(r"\w*$")
+    classname = spec.get("entryclass")
+    jobname = str(prefix_match.search(str(classname)))
+    kopf.info(body, reason="debugging", message=f"found jobname {jobname}")
+    if jobname is not None:
+        jobname.lower()
+    return jobname
