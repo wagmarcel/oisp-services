@@ -13,6 +13,7 @@ namespace = os.environ["OISP_NAMESPACE"]
 FLINK_URL = os.getenv("OISP_FLINK_REST") or f"http://flink-jobmanager-rest.{namespace}:8081"
 JOB_STATUS_UNKNOWN = "UNKNOWN"
 JOB_STATUS_FAILED = "FAILED"
+JOB_STATUS_CANCELED = "CANCELED"
 JOB_STATUS_FIXING = "OPERATOR TRIES TO FIX"
 
 @kopf.on.create("oisp.org", "v1", "beamservices")
@@ -40,7 +41,7 @@ async def updates(stopped, patch, logger, body, spec, status, **kwargs):
         # before creating job, check whether jobmanager is ready
         # sometimes if it is not ready, deployments are failing and
         # this leads to LONG timeout until all is running again
-        if check_free_slots(body) == 0:
+        if check_readiness(body) == 0:
             return
         job_id = create_job(body, spec, update_status["jarId"])
         if job_id is not None:
@@ -51,6 +52,8 @@ async def updates(stopped, patch, logger, body, spec, status, **kwargs):
     # check if job exists. If it exists, check whether the state is FAILED
     # all other states should be handled by jobmanager
     job_status = JOB_STATUS_UNKNOWN
+    # Hmm, but what is the jobname prefix? Assumption: lowercased entry class name
+    name = get_jobname_prefix(body, spec)
     try:
         jobs_request = requests.get(
             f"{FLINK_URL}/jobs").json()
@@ -61,11 +64,10 @@ async def updates(stopped, patch, logger, body, spec, status, **kwargs):
         need_job_restart = True
         for element in jobs:
             if element['id'] == job_id:
-                if element['status'] != JOB_STATUS_FAILED:
+                if element['status'] != JOB_STATUS_FAILED and element['status'] != JOB_STATUS_CANCELED:
                     # job exists but failed
                     # for all other states, assume that jobmanager is taking
                     # care for restarting
-                    # TODO consider checking CANCELLED state as well 
                     need_job_restart = False
                     job_status = element['status']
                 continue
@@ -76,10 +78,10 @@ async def updates(stopped, patch, logger, body, spec, status, **kwargs):
                 f"{FLINK_URL}/jobs/{element['id']}").json()
             job_name = job_request.get("name")
             # cancel if it has the resource prefix
-            # Hmm, but what is the jobname prefix? Assumption: lowercased entry class name
-            name = get_jobname_prefix(body, spec)
             if name is not None and job_name.startswith(name):
-                cancel_job(body, element['id'])
+                # AND if it is not already in cancelled or failed state
+                if element['status'] != JOB_STATUS_CANCELED and element['status'] != JOB_STATUS_FAILED:
+                    cancel_job(body, element['id'])
         if need_job_restart:
             return {"deployed": False, "jobCreated": False, "redeployed": True}
     except (ConnectionRefusedError, requests.ConnectionError):
@@ -98,9 +100,9 @@ def delete(body, **kwargs):
         return
     if not update_status:
         return
-    if update_status.get("jobId"):
-        resp = requests.patch(
-            f"{FLINK_URL}/jobs/{update_status['jobId']}", params={"mode": "cancel"})
+    job_id = update_status.get("jobId")
+    if job_id:
+        cancel_job(body, job_id)
 
 
 def download_file_via_http(url):
@@ -192,11 +194,11 @@ def delete_jar(body, jar_path):
             kopf.info(body, reason="Jar deleted", message=f"Jar file: {jar_path}")
 
 
-def check_free_slots(body):
+def check_readiness(body):
     try:
         response = requests.get(f"{FLINK_URL}/overview")
         if response.status_code == 200:
-            free_slots = response.json().get("slots-available")
+            free_slots = response.json().get("slots-total")
             return free_slots
     except requests.exceptions.RequestException as e:
             kopf.info(body, reason="jobmanager overview", message="Exception while trying to check cluster state. Reason: " + str(e))
@@ -204,7 +206,7 @@ def check_free_slots(body):
 
 def cancel_job(body, job_id):
     try:
-        response = requests.get(f"{FLINK_URL}/jobs/{job_id}")
+        response = requests.patch(f"{FLINK_URL}/jobs/{job_id}")
         if response.status_code != 202:
             raise kopf.TemporaryError("Could not cancel job from cluster", delay=5)
     except requests.exceptions.RequestException as e:
@@ -212,9 +214,10 @@ def cancel_job(body, job_id):
 
 def get_jobname_prefix(body, spec):
     prefix_match = re.compile(r"\w*$")
-    classname = spec.get("entryclass")
-    jobname = str(prefix_match.search(str(classname)))
-    kopf.info(body, reason="debugging", message=f"found jobname {jobname}")
+    classname = spec["entryClass"]
+    jobname = prefix_match.search(classname)[0]
+
     if jobname is not None:
-        jobname.lower()
+        jobname = jobname.lower()
+        kopf.info(body, reason="debugging", message=f"found jobname {jobname} in {classname}")
     return jobname
