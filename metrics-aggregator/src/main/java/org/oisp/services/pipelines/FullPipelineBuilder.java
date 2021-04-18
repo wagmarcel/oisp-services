@@ -109,13 +109,13 @@ public final class FullPipelineBuilder {
         PCollection<KV<String, AggregatedObservation>> observationsPerHour = aggrPerMinute
                 .apply("Filter out non needed elements", Filter.by(aggObs -> aggObs.getAggregator().getType() != Aggregator.AggregatorType.COUNT
                 && aggObs.getAggregator().getType() != Aggregator.AggregatorType.SUM))
-                //.apply(ParDo.of(new DebugBridge2()))
+                .apply(ParDo.of(new DebugBridge2()))
                 .apply(ParDo.of(new AggregatedObservationToKV()))
                 .apply("Aggregation Window for hours", Window.configure().<KV<String, AggregatedObservation>>into(
                         FullTimeInterval.withAggregator(
                                 new Aggregator(Aggregator.AggregatorType.NONE, Aggregator.AggregatorUnit.hours))
-                ));
-                //.apply(ParDo.of(new DebugBridge()));
+                ))
+                .apply(ParDo.of(new DebugBridge()));
 
         PCollection<KV<String, Iterable<AggregatedObservation>>> groupedObservationsPerHour = observationsPerHour
                 .apply("Group windows by keys for hours", GroupByKey.<String, AggregatedObservation>create());
@@ -135,7 +135,7 @@ public final class FullPipelineBuilder {
         //Heartbeat Pipeline
         //Send regular Heartbeat to Kafka topic
         String serverUri = conf.get(Config.KAFKA_BOOTSTRAP_SERVERS).toString();
-        LOG.debug("serverUri:" + serverUri);
+        LOG.info("serverUri:" + serverUri);
         p.apply(GenerateSequence.from(0).withRate(1, Duration.standardSeconds(1)))
                 .apply(ParDo.of(new StringToKVFn()))
                 .apply(KafkaIO.<String, String>write()
@@ -178,7 +178,7 @@ public final class FullPipelineBuilder {
                 if (!obs.isByteArray()) {
                     LOG.info(obs.getValue() + ", " + Instant.ofEpochMilli(obs.getOn()) + ";");
                 } else {
-                    LOG.debug("*removed*");
+                    LOG.info("*removed*");
                 }
             }
             LOG.debug("<= end");
