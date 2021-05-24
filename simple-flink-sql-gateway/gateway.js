@@ -12,6 +12,10 @@ const sql_plugins = process.env.SIMPLE_FLINK_SQL_GATEWAY_ROOT || './plugins';
 
 app.use(express.json());
 
+app.get('/health', function(_, response) {
+  response.status(200).send("OK");
+});
+
 app.post('/v1/sessions/:session_id/statements', function (request, response) {
   //for now ignore session_id
   var body = request.body;
@@ -26,6 +30,7 @@ app.post('/v1/sessions/:session_id/statements', function (request, response) {
   var command = flink_root + "/bin/sql-client.sh -l " + sql_plugins + " -f " + filename;
   logger.debug("Now executing " + command);
   exec(command, (error, stdout, stderr) => {
+    fs.unlink(filename);
     if (error) {
       response.status(500);
       response.send("Error while executing sql-client: " + error);
