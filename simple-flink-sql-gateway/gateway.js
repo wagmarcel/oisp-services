@@ -7,13 +7,14 @@ const app = express();
 const logger = require("./lib/logger.js");
 const port = process.env.SIMPLE_FLINK_SQL_GATEWAY_PORT || 9000;
 const flink_root = process.env.SIMPLE_FLINK_SQL_GATEWAY_ROOT || "./flink-1.13.0";
-const sql_plugins = process.env.SIMPLE_FLINK_SQL_GATEWAY_ROOT || './plugins';
+const sql_jars = process.env.SIMPLE_FLINK_SQL_GATEWAY_JARS || './jars';
 
 
 app.use(express.json());
 
 app.get('/health', function(_, response) {
   response.status(200).send("OK");
+  logger.debug("Health Endpoint was requested.");
 });
 
 app.post('/v1/sessions/:session_id/statements', function (request, response) {
@@ -27,10 +28,10 @@ app.post('/v1/sessions/:session_id/statements', function (request, response) {
   var id = uuid.v4();
   var filename = "/tmp/script_" + id + ".sql";
   fs.writeFileSync(filename, body.statement.toString());
-  var command = flink_root + "/bin/sql-client.sh -l " + sql_plugins + " -f " + filename;
+  var command = flink_root + "/bin/sql-client.sh -l " + sql_jars + " -f " + filename;
   logger.debug("Now executing " + command);
   exec(command, (error, stdout, stderr) => {
-    fs.unlink(filename);
+    fs.unlinkSync(filename);
     if (error) {
       response.status(500);
       response.send("Error while executing sql-client: " + error);

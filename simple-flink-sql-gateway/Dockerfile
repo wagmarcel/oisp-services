@@ -1,4 +1,4 @@
-FROM  maven:3.8.1-openjdk-11
+FROM  maven:3.8.1-openjdk-8
 ADD udf/ udf
 RUN cd udf/Epoch2SQL && mvn package
 
