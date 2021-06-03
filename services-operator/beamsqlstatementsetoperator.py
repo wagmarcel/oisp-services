@@ -8,8 +8,11 @@ FLINK_URL = os.getenv("OISP_FLINK_REST") or f"http://flink-jobmanager-rest.{name
 FLINK_SQL_GATEWAY = os.getenv("OISP_SQL_GATEWAY") or f"http://flink-sql-gateway.{namespace}:9000"
 
 @kopf.on.create("oisp.org", "v1alpha1", "beamsqlstatementsets")
-def create(body, spec, patch, **kwargs):
-    kopf.info(body, reason="Creating", message="Creating beamservices"+str(spec))
+def create(body, spec, patch, logger, **kwargs):
+    name = body["metadata"].get("name")
+    namespace = body["metadata"].get("namespace")
+    kopf.info(body, reason="Creating", message=f"Creating beamsqlstatementsets {name} in namespace {namespace}")
+    logger.info(f"Created beamsqlstatementsets {name} in namespace {namespace}")
     return {"createdOn": str(time.time())}
 
 
