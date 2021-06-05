@@ -45,7 +45,7 @@ app.post('/v1/sessions/:session_id/statements', function (request, response) {
     if (found !== null && found !== undefined) {
       var jobId = found[1];
       logger.debug("jobId found:" + jobId);
-      response.status(200).send('{ "id": "' + jobId + '" }');
+      response.status(200).send('{ "jobid": "' + jobId + '" }');
     } else { // no JOB ID found, unsuccessful
       response.status(500);
       response.send("Not successfully submitted. No JOB ID found in server reply.");
