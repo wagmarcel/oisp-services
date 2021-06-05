@@ -27,7 +27,7 @@ JOB_ID = "job_id"
 STATE = "state"
 
 @kopf.on.create("oisp.org", "v1alpha1", "beamsqlstatementsets")
-def create(body, spec, patch, logger, **kwargs):
+async def create(body, spec, patch, logger, **kwargs):
     name = body["metadata"].get("name")
     namespace = body["metadata"].get("namespace")
     kopf.info(body, reason="Creating", message=f"Creating beamsqlstatementsets {name} in namespace {namespace}")
@@ -36,13 +36,39 @@ def create(body, spec, patch, logger, **kwargs):
     patch.status[JOB_ID] = None
     return {"createdOn": str(time.time())}
 
+@kopf.on.delete("oisp.org", "v1alpha1", "beamsqlstatementsets", retries=10)
+async def delete(body, spec, patch, logger, **kwargs):
+    """
+    Deleting beamsqlstatementsets
+
+    If state is not CANCELING and CANCELED, trigger cancelation of job and set state to CANCELING
+    If Canceling, refresh state, when canceled, allow deletion,otherwise wait
+    """
+    name = body["metadata"].get("name")
+    namespace = body["metadata"].get("namespace")
+    state = body['status'].get(STATE)
+    job_id = body['status'].get(JOB_ID)
+    if not state == States.CANCELED.name and not state == States.CANCELING.name:
+        try:
+            flink_util.cancel_job(logger, job_id)
+        except Exception as err:
+            raise kopf.TemporaryError(f"Error trying to cancel {namespace}/{name} with message {err}. Trying again later", 10)    
+        patch.status[STATE] = States.CANCELING.name
+        raise kopf.TemporaryError(f"Waiting for confirmation of cancelation for {namespace}/{name}", 5)
+    elif state == States.CANCELING.name:
+        refresh_state(body, patch, logger)
+        if not patch.status[STATE] == States.CANCELED.name:
+            raise kopf.TemporaryError(f"Canceling, waiting for final confirmation of cancelation for {namespace}/{name}", 5)
+    kopf.info(body, reason="deleting", message=f" {namespace}/{name} cancelled and ready for deletion")
+    logger.info(f" {namespace}/{name} cancelled and ready for deletion")
+
 @kopf.index('oisp.org', "v1alpha1", "beamsqltables")
-def beamsqltables(name: str, namespace: str, body: kopf.Body, **_):
+async def beamsqltables(name: str, namespace: str, body: kopf.Body, **_):
     return {(namespace, name): body}
 
 
 @kopf.timer("oisp.org", "v1alpha1", "beamsqlstatementsets", interval=timer_interval_seconds, backoff=timer_backoff_seconds)
-def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, status, **kwargs):
+async def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, status, **kwargs):
     """
     Managaging the main lifecycle of the beamsqlstatementset crd
     Current state is stored under
@@ -68,7 +94,6 @@ def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, statu
         - delete done => CANCELLED
     Currently, cancelled state is not recovered
     """
-
     namespace = body['metadata'].get("namespace")
     name = body['metadata'].get("name")
     state = body['status'].get(STATE)
@@ -116,15 +141,26 @@ def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, statu
         return
     
     # If state is not INITIALIZED, DEPLOYMENT_FAILURE nor CANCELED, the state is monitored
-    elif not state == States.CANCELED.name and not state == States.CANCELING.name :
-        state = body['status'].get(STATE)
-        job_id = body['status'].get(JOB_ID)
-        try:
-            job_info = flink_util.get_job_status(logger, job_id)
-        except Exception as err:
-            patch.status[STATE] = States.UNKNOWN.name
-            raise kopf.TemporaryError(f"Could not monitor task {job_id}", timer_backoff_temporary_failure_seconds)
-        patch.status[STATE] = job_info.get("state") 
+    elif not state == States.CANCELED.name and not state == States.CANCELING.name:
+        #state = body['status'].get(STATE)
+        #job_id = body['status'].get(JOB_ID)
+        #try:
+        #    job_info = flink_util.get_job_status(logger, job_id)
+        #except Exception as err:
+        #    patch.status[STATE] = States.UNKNOWN.name
+        #    raise kopf.TemporaryError(f"Could not monitor task {job_id}", timer_backoff_temporary_failure_seconds)
+        refresh_state(body, patch, logger)
+
+
+def refresh_state(body, patch, logger):
+    state = body['status'].get(STATE)
+    job_id = body['status'].get(JOB_ID)
+    try:
+        job_info = flink_util.get_job_status(logger, job_id)
+    except Exception as err:
+        patch.status[STATE] = States.UNKNOWN.name
+        raise kopf.TemporaryError(f"Could not monitor task {job_id}", timer_backoff_temporary_failure_seconds)
+    patch.status[STATE] = job_info.get("state")
 
 
 def create_ddl_from_beamsqltables(body, beamsqltable, logger):
@@ -145,7 +181,6 @@ def create_ddl_from_beamsqltables(body, beamsqltable, logger):
     logger: log object 
         Local log object provided from framework
     """
-
     name = beamsqltable.metadata.name
     ddl = f"CREATE TABLE `{name}` ("
     for key, value in beamsqltable.spec.get("fields").items():
@@ -212,7 +247,6 @@ def deploy_statementset(statementset, logger):
         id of the deployed job
         
     """
-
     request = f"{FLINK_SQL_GATEWAY}/v1/sessions/session/statements"
     logger.debug(f"Deployment request to SQL Gateway {request}")
     response = requests.post(request,
