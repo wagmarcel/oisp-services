@@ -68,12 +68,13 @@ class TestUpdates(TestCase):
     def create_ddl_from_beamsqltables(body, beamsqltable, logger):
         return "DDL;"
     def submit_statementset_successful(statementset, logger):
-        assert statementset == "DDL;\nBEGIN STATEMENT SET;\nselect;\nEND STATEMENT SET;"
+        print(statementset)
+        assert statementset == "SET pipeline.name = 'namespace/name';\nDDL;\nBEGIN STATEMENT SET;\nselect;\nEND;"
         return "job_id"
     def submit_statementset_failed(statementset, logger):
         raise Exception("Mock submission failed")
     @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
-    @patch('beamsqlstatementsetoperator.submit_statementset', submit_statementset_successful)
+    @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_successful)
     def test_update_submission(self):
 
         body = {
@@ -96,11 +97,11 @@ class TestUpdates(TestCase):
         
         beamsqltables = {("namespace", "table"): ({}, {}) }
         target.updates(beamsqltables, None, patch,  Logger(), body, body["spec"], body["status"])
-        assert patch.status['state'] == "SUBMITTED"
+        assert patch.status['state'] == "DEPLOYING"
         assert patch.status['job_id'] == "job_id"
 
     @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
-    @patch('beamsqlstatementsetoperator.submit_statementset', submit_statementset_failed)
+    @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_failed)
     def test_update_submission_failure(self):
 
         body = {
@@ -126,11 +127,11 @@ class TestUpdates(TestCase):
             target.updates(beamsqltables, None, patch,  Logger(), body, body["spec"], body["status"])
         except Exception as err:
             pass
-        assert patch.status['state'] == "SUBMISSION_FAILURE"
+        assert patch.status['state'] == "DEPLOYMENT_FAILURE"
         assert patch.status['job_id'] == None
 
     @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
-    @patch('beamsqlstatementsetoperator.submit_statementset', submit_statementset_failed)
+    @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_failed)
     def test_update_table_failure(self):
 
         body = {

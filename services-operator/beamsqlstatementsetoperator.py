@@ -19,7 +19,8 @@ class States(Enum):
     RUNNING = "RUNNING",
     FAILED = "FAILED",
     CANCELED = "CANCELED",
-    CANCELING = "CANCELING"
+    CANCELING = "CANCELING",
+    UNKNOWN = "UNKNOWN"
 
 
 JOB_ID = "job_id"
@@ -34,7 +35,6 @@ def create(body, spec, patch, logger, **kwargs):
     patch.status[STATE] = States.INITIALIZED.name
     patch.status[JOB_ID] = None
     return {"createdOn": str(time.time())}
-
 
 @kopf.index('oisp.org', "v1alpha1", "beamsqltables")
 def beamsqltables(name: str, namespace: str, body: kopf.Body, **_):
@@ -57,12 +57,13 @@ def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, statu
         - DEPLOYMENT_FAILURE - something went wrong while operator tried to deploy (e.g. server returned 500)
         - CANCELED - resource has been canceled
         - CANCELING - resource is in cancelling process
+        - UNKNOWN - resource cannot be monitored
     
     Transitions:
         - undefined/INITIALIZED => DEPLOYING
         - INITIALIZED => DEPLOYMENT_FAILURE
         - DEPLOYMENT_FAILURE => DEPLOYING
-        - DEPLOYING => FLINK_STATES(RUNNING/FAILED/CANCELLED/CANCELLING)
+        - DEPLOYING/UNKNOWN => FLINK_STATES(RUNNING/FAILED/CANCELLED/CANCELLING)
         - delete resource => CANCELLING
         - delete done => CANCELLED
     Currently, cancelled state is not recovered
@@ -114,12 +115,16 @@ def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, statu
         patch.status[JOB_ID] = job_id
         return
     
-    # If state is not INITIALIZED, DEPLOYMENT_FAILURE nor DELETED, the state is monitored
-    elif not state == States.DELETED.name:
+    # If state is not INITIALIZED, DEPLOYMENT_FAILURE nor CANCELED, the state is monitored
+    elif not state == States.CANCELED.name and not state == States.CANCELING.name :
         state = body['status'].get(STATE)
         job_id = body['status'].get(JOB_ID)
-        flink_util.get_job_status(logger, job_id)
-
+        try:
+            job_info = flink_util.get_job_status(logger, job_id)
+        except Exception as err:
+            patch.status[STATE] = States.UNKNOWN.name
+            raise kopf.TemporaryError(f"Could not monitor task {job_id}", timer_backoff_temporary_failure_seconds)
+        patch.status[STATE] = job_info.get("state") 
 
 
 def create_ddl_from_beamsqltables(body, beamsqltable, logger):
