@@ -27,7 +27,7 @@ JOB_ID = "job_id"
 STATE = "state"
 
 @kopf.on.create("oisp.org", "v1alpha1", "beamsqlstatementsets")
-async def create(body, spec, patch, logger, **kwargs):
+def create(body, spec, patch, logger, **kwargs):
     name = body["metadata"].get("name")
     namespace = body["metadata"].get("namespace")
     kopf.info(body, reason="Creating", message=f"Creating beamsqlstatementsets {name} in namespace {namespace}")
@@ -37,7 +37,7 @@ async def create(body, spec, patch, logger, **kwargs):
     return {"createdOn": str(time.time())}
 
 @kopf.on.delete("oisp.org", "v1alpha1", "beamsqlstatementsets", retries=10)
-async def delete(body, spec, patch, logger, **kwargs):
+def delete(body, spec, patch, logger, **kwargs):
     """
     Deleting beamsqlstatementsets
 
@@ -63,12 +63,12 @@ async def delete(body, spec, patch, logger, **kwargs):
     logger.info(f" {namespace}/{name} cancelled and ready for deletion")
 
 @kopf.index('oisp.org', "v1alpha1", "beamsqltables")
-async def beamsqltables(name: str, namespace: str, body: kopf.Body, **_):
+def beamsqltables(name: str, namespace: str, body: kopf.Body, **_):
     return {(namespace, name): body}
 
 
 @kopf.timer("oisp.org", "v1alpha1", "beamsqlstatementsets", interval=timer_interval_seconds, backoff=timer_backoff_seconds)
-async def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, status, **kwargs):
+def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, status, **kwargs):
     """
     Managaging the main lifecycle of the beamsqlstatementset crd
     Current state is stored under

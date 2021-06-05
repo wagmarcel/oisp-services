@@ -68,7 +68,6 @@ class TestUpdates(TestCase):
     def create_ddl_from_beamsqltables(body, beamsqltable, logger):
         return "DDL;"
     def submit_statementset_successful(statementset, logger):
-        print(statementset)
         assert statementset == "SET pipeline.name = 'namespace/name';\nDDL;\nBEGIN STATEMENT SET;\nselect;\nEND;"
         return "job_id"
     def submit_statementset_failed(statementset, logger):
@@ -76,7 +75,6 @@ class TestUpdates(TestCase):
     @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
     @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_successful)
     def test_update_submission(self):
-
         body = {
                 "metadata": {
                     "name": "name",
@@ -133,7 +131,6 @@ class TestUpdates(TestCase):
     @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
     @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_failed)
     def test_update_table_failure(self):
-
         body = {
                 "metadata": {
                     "name": "name",
@@ -154,10 +151,63 @@ class TestUpdates(TestCase):
         
         beamsqltables = {}
         try:
-            target.updates(beamsqltables, None, patch,  Logger(), body, body["spec"], body["status"])
+            target.updates(beamsqltables, None, patch, Logger(), body, body["spec"], body["status"])
         except Exception as err:
             assert type(err) == kopf.TemporaryError
             assert str(err).startswith("Table DDLs could not be created for namespace/name.")
+class TestDeletion(TestCase):
+    def update_status_nochange(body, patch, logger):
+        pass
+    def update_status_change(body, patch, logger):
+        patch.status["state"] = "CANCELED"
+    @patch('kopf.info', kopf_info)
+    def test_canceled_delete(self):
+        body = {
+                "metadata": {
+                    "name": "name",
+                    "namespace": "namespace"
+                },
+                "spec": {
+                    "sqlstatements": ["select;"],
+                    "tables": ["table"]
+                },
+                "status": {
+                    "state": "CANCELED",
+                    "job_id": "job_id"
+                }
+        }
+        patch = Bunch()
+        patch.status = {}
+        
+        beamsqltables = {}
+        target.delete(body, body["spec"], patch, Logger())
+        assert patch.status == {}
+    @patch('kopf.info', kopf_info)
+    @patch('beamsqlstatementsetoperator.refresh_state', update_status_nochange)
+    def test_canceling_delete(self):
+        body = {
+                "metadata": {
+                    "name": "name",
+                    "namespace": "namespace"
+                },
+                "spec": {
+                    "sqlstatements": ["select;"],
+                    "tables": ["table"]
+                },
+                "status": {
+                    "state": "CANCELING",
+                    "job_id": "job_id"
+                }
+        }
+        patch = Bunch()
+        patch.status = {"state": ""}
+        
+        beamsqltables = {}
+        try:
+            target.delete(body, body["spec"], patch, Logger())
+        except Exception as err:
+            assert type(err) == kopf.TemporaryError
+            assert str(err).startswith("Canceling,")
 if __name__ == '__main__':
     #test_creation()
     unittest.main()
