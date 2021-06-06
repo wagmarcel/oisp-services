@@ -41,19 +41,25 @@ def delete(body, spec, patch, logger, **kwargs):
     """
     Deleting beamsqlstatementsets
 
-    If state is not CANCELING and CANCELED, trigger cancelation of job and set state to CANCELING
+    If state is not CANCELING and not CANCELED and job_id defined, refresh status and trigger cancelation if needed
     If Canceling, refresh state, when canceled, allow deletion,otherwise wait
     """
     name = body["metadata"].get("name")
     namespace = body["metadata"].get("namespace")
     state = body['status'].get(STATE)
     job_id = body['status'].get(JOB_ID)
-    if not state == States.CANCELED.name and not state == States.CANCELING.name:
+    if not state == States.CANCELED.name and not state == States.CANCELING.name and job_id:
         try:
-            flink_util.cancel_job(logger, job_id)
+            refresh_state(body, patch, logger)
+            if patch.status[STATE]:
+                state = patch.status[STATE]
+            if not state == States.CANCELING.name or not state == States.CANCELED.name:
+                flink_util.cancel_job(logger, job_id)
         except Exception as err:
-            raise kopf.TemporaryError(f"Error trying to cancel {namespace}/{name} with message {err}. Trying again later", 10)    
-        patch.status[STATE] = States.CANCELING.name
+            raise kopf.TemporaryError(f"Error trying to cancel {namespace}/{name} with message {err}. Trying again later", 10)
+        # cancelation went through, delete job_id and update state
+        patch.status[JOB_ID] = None
+        patch.status[STATE] = States.CANCELING.name   
         raise kopf.TemporaryError(f"Waiting for confirmation of cancelation for {namespace}/{name}", 5)
     elif state == States.CANCELING.name:
         refresh_state(body, patch, logger)

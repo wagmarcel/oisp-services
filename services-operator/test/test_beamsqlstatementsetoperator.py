@@ -164,6 +164,7 @@ class TestDeletion(TestCase):
         pass
     def cancel_job_error(logger, job_id):
         raise Exception("Could not cancel job")
+    
     @patch('kopf.info', kopf_info)
     def test_canceled_delete(self):
         body = {
@@ -237,7 +238,8 @@ class TestDeletion(TestCase):
         beamsqltables = {}
         
         target.delete(body, body["spec"], patch, Logger())
-    @patch('flink_util.cancel_job', cancel_job)   
+    @patch('flink_util.cancel_job', cancel_job)
+    @patch('beamsqlstatementsetoperator.refresh_state', update_status_nochange)
     @patch('kopf.info', kopf_info)
     def test_canceling_delete_flink_ok(self):
         body = {
