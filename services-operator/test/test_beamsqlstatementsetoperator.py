@@ -160,6 +160,10 @@ class TestDeletion(TestCase):
         pass
     def update_status_change(body, patch, logger):
         patch.status["state"] = "CANCELED"
+    def cancel_job(logger, job_id):
+        pass
+    def cancel_job_error(logger, job_id):
+        raise Exception("Could not cancel job")
     @patch('kopf.info', kopf_info)
     def test_canceled_delete(self):
         body = {
@@ -182,6 +186,7 @@ class TestDeletion(TestCase):
         beamsqltables = {}
         target.delete(body, body["spec"], patch, Logger())
         assert patch.status == {}
+
     @patch('kopf.info', kopf_info)
     @patch('beamsqlstatementsetoperator.refresh_state', update_status_nochange)
     def test_canceling_delete(self):
@@ -208,6 +213,84 @@ class TestDeletion(TestCase):
         except Exception as err:
             assert type(err) == kopf.TemporaryError
             assert str(err).startswith("Canceling,")
+
+    @patch('kopf.info', kopf_info)
+    @patch('beamsqlstatementsetoperator.refresh_state', update_status_change)
+    def test_canceling_delete(self):
+        body = {
+                "metadata": {
+                    "name": "name",
+                    "namespace": "namespace"
+                },
+                "spec": {
+                    "sqlstatements": ["select;"],
+                    "tables": ["table"]
+                },
+                "status": {
+                    "state": "CANCELING",
+                    "job_id": "job_id"
+                }
+        }
+        patch = Bunch()
+        patch.status = {"state": ""}
+        
+        beamsqltables = {}
+        
+        target.delete(body, body["spec"], patch, Logger())
+    @patch('flink_util.cancel_job', cancel_job)   
+    @patch('kopf.info', kopf_info)
+    def test_canceling_delete_flink_ok(self):
+        body = {
+                "metadata": {
+                    "name": "name",
+                    "namespace": "namespace"
+                },
+                "spec": {
+                    "sqlstatements": ["select;"],
+                    "tables": ["table"]
+                },
+                "status": {
+                    "state": "RUNNING",
+                    "job_id": "job_id"
+                }
+        }
+        patch = Bunch()
+        patch.status = {"state": ""}
+        
+        beamsqltables = {}
+        try:
+            target.delete(body, body["spec"], patch, Logger())
+        except Exception as err:
+            assert type(err) == kopf.TemporaryError
+            assert str(err).startswith("Waiting for")
+        assert patch.status["state"] == "CANCELING"
+    @patch('flink_util.cancel_job', cancel_job_error)   
+    @patch('kopf.info', kopf_info)
+    def test_canceling_delete_flink_error(self):
+        body = {
+                "metadata": {
+                    "name": "name",
+                    "namespace": "namespace"
+                },
+                "spec": {
+                    "sqlstatements": ["select;"],
+                    "tables": ["table"]
+                },
+                "status": {
+                    "state": "RUNNING",
+                    "job_id": "job_id"
+                }
+        }
+        patch = Bunch()
+        patch.status = {"state": ""}
+        
+        beamsqltables = {}
+        try:
+            target.delete(body, body["spec"], patch, Logger())
+        except Exception as err:
+            assert type(err) == kopf.TemporaryError
+            assert str(err).startswith("Error trying")
+        assert not patch.status["state"] == "CANCELING"
 if __name__ == '__main__':
     #test_creation()
     unittest.main()
