@@ -5,7 +5,7 @@ import requests
 from enum import Enum
 import flink_util
 
-namespace = os.environ["OISP_NAMESPACE"] or "oisp"
+namespace = os.getenv("OISP_NAMESPACE") or "oisp"
 FLINK_URL = os.getenv("OISP_FLINK_REST") or f"http://flink-jobmanager-rest.{namespace}:8081"
 FLINK_SQL_GATEWAY = os.getenv("OISP_FLINK_SQL_GATEWAY") or f"http://flink-sql-gateway.{namespace}:9000"
 timer_interval_seconds = os.getenv("TIMER_INTERVAL") or 10
@@ -192,28 +192,45 @@ def create_ddl_from_beamsqltables(body, beamsqltable, logger):
     ddl = ddl[:-1] # remove last "," from ddl, enumeration is done
     ddl += ") WITH ("
     if beamsqltable.spec.get("connector") != "kafka":
-        kopf.warn(body, reason="invalid CRD", message=f"Beamsqltable {name} has not supported connector.")
+        message = f"Beamsqltable {name} has not supported connector."
+        kopf.warn(body, reason="invalid CRD", message = message)
+        logger.warn(message)
         return None
     ddl += "'connector' = 'kafka'"
-    format = beamsqltable.spec.get("format") 
-    if not format:
-        kopf.warn(body, reason="invalid CRD", message=f"Beamsqltable {name} has no format description.")
+    # loop through the value structure
+    # value.format is mandatory 
+    value = beamsqltable.spec.get("value") 
+    if not value:
+        message = f"Beamsqltable {name} has no value description."
+        kopf.warn(body, reason="invalid CRD", message = message)
+        logger.warn(message)
         return None
-    ddl += f",'format' = '{format}'"
+    if not value.get("format"):
+        message = f"Beamsqltable {name} has no value.format description."
+        kopf.warn(body, reason="invalid CRD", message = mesage)
+        logger.warn(message)
+    for v_key, v_value in value.items():
+        ddl += f",'{v_key}' = '{v_value}'"
     # loop through the kafka structure
     # map all key value pairs to 'key' = 'value',
     # except properties
     kafka = beamsqltable.spec.get("kafka")
     if not kafka:
-        kopf.warn(body, reason="invalid CRD", message=f"Beamsqltable {name} has no Kafka connector descriptor.")
+        message = f"Beamsqltable {name} has no Kafka connector descriptor."
+        kopf.warn(body, reason="invalid CRD", message = message)
+        logger.warn(message)
         return None
     # check mandatory fields in Kafka, topic, bootstrap.server
     if not kafka.get("topic"):
-        kopf.warn(body, reason="invalid CRD", message=f"Beamsqltable {name} has no kafka topic.")
+        message = f"Beamsqltable {name} has no kafka topic."
+        kopf.warn(body, reason="invalid CRD", message = message)
+        logger.warn(message)
         return None
 
     if not kafka.get("properties").get("bootstrap.servers"):
-        kopf.warn(body, reason="invalid CRD", message=f"Beamsqltable {name} has no kafka bootstrap servers found")
+        message = f"Beamsqltable {name} has no kafka bootstrap servers found"
+        kopf.warn(body, reason="invalid CRD", message = message)
+        logger.warn(message)
         return None
     # the other fields are inserted, there is not (yet) a check for valid fields
     for kafka_key, kafka_value in kafka.items():

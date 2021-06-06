@@ -19,7 +19,10 @@ spec:
     properties:
       bootstrap.servers: oisp-kafka-headless:9092
     scan.startup.mode: latest-offset
-  format: json
+  value:
+    format: json
+    json.fail-on-missing-field: false
+    json.ignore-parse-errors: true
 ---
 apiVersion: oisp.org/v1alpha1
 kind: BeamSqlTable
@@ -42,4 +45,7 @@ spec:
     properties:
       bootstrap.servers: oisp-kafka-headless:9092
     scan.startup.mode: latest-offset
-  format: json
+  value:
+    format: json
+    json.fail-on-missing-field: false
+    json.ignore-parse-errors: true

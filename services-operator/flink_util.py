@@ -2,6 +2,7 @@ import os
 import re
 import requests
 
+namespace = os.getenv("OISP_NAMESPACE") or "oisp"
 FLINK_URL = os.getenv("OISP_FLINK_REST") or f"http://flink-jobmanager-rest.{namespace}:8081"
 
 
