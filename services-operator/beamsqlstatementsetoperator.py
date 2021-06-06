@@ -148,14 +148,11 @@ def updates(beamsqltables: kopf.Index, stopped, patch, logger, body, spec, statu
     
     # If state is not INITIALIZED, DEPLOYMENT_FAILURE nor CANCELED, the state is monitored
     elif not state == States.CANCELED.name and not state == States.CANCELING.name:
-        #state = body['status'].get(STATE)
-        #job_id = body['status'].get(JOB_ID)
-        #try:
-        #    job_info = flink_util.get_job_status(logger, job_id)
-        #except Exception as err:
-        #    patch.status[STATE] = States.UNKNOWN.name
-        #    raise kopf.TemporaryError(f"Could not monitor task {job_id}", timer_backoff_temporary_failure_seconds)
         refresh_state(body, patch, logger)
+        if patch.status[STATE] == States.UNKNOWN.name:
+            patch.status[STATE] = States.INITIALIZED.name
+            patch.status[JOB_ID] = None
+
 
 
 def refresh_state(body, patch, logger):
@@ -166,8 +163,12 @@ def refresh_state(body, patch, logger):
     except Exception as err:
         patch.status[STATE] = States.UNKNOWN.name
         raise kopf.TemporaryError(f"Could not monitor task {job_id}", timer_backoff_temporary_failure_seconds)
-    patch.status[STATE] = job_info.get("state")
-
+    if job_info is not None:
+        patch.status[STATE] = job_info.get("state")
+    else:
+        # API etc works but no job found. Can happen for instance after restart of job manager
+        # In this case, we need to signal that stage
+        patch.status[STATE] = States.UNKNOWN.name
 
 def create_ddl_from_beamsqltables(body, beamsqltable, logger):
     """

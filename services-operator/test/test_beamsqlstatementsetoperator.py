@@ -28,25 +28,6 @@ class Logger():
 def kopf_info(body, reason, message):
     pass
 
-#def test_creation():
-#    with KopfRunner(['run', '-A', '--verbose', './beamsqlstatementsetoperator.py']) as runner:
-#        # do something while the operator is running.
-#        #print(runner)
-#        try:
-#            subprocess.run("kubectl delete -f ./kubernetes/examples/beamsqlstatementset.yaml", shell=True, check=True)
-#        except:
-#            print("beamsqlstatementset not existing")
-#        time.sleep(2)
-#        subprocess.run("kubectl apply -f ./kubernetes/examples/beamsqlstatementset.yaml", shell=True, check=True)
-#        time.sleep(1)  # give it some time to react and to sleep and to retry
-#        subprocess.run("kubectl delete -f ./kubernetes/examples/beamsqlstatementset.yaml", shell=True, check=True)
-#
-#    #print(runner.stdout)
-#    assert runner.exit_code == 0
-#    assert runner.exception is None
-#    assert 'Created beamsqlstatementsets beamsqlstatementset-example in namespace default' in runner.stdout
-#    assert not 'Created table ddl' in runner.stdout
-
 class TestInit(TestCase):
     @patch('kopf.info', kopf_info)
     def test_init(self):
@@ -72,6 +53,8 @@ class TestUpdates(TestCase):
         return "job_id"
     def submit_statementset_failed(statementset, logger):
         raise Exception("Mock submission failed")
+    def update_status_unknown(body, patch, logger):
+        patch.status["state"] = "UNKNOWN"
     @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
     @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_successful)
     def test_update_submission(self):
@@ -155,6 +138,33 @@ class TestUpdates(TestCase):
         except Exception as err:
             assert type(err) == kopf.TemporaryError
             assert str(err).startswith("Table DDLs could not be created for namespace/name.")
+    @patch('beamsqlstatementsetoperator.create_ddl_from_beamsqltables', create_ddl_from_beamsqltables)
+    @patch('beamsqlstatementsetoperator.deploy_statementset', submit_statementset_failed)
+    @patch('beamsqlstatementsetoperator.refresh_state', update_status_unknown)
+    def test_update_handle_unknown(self):
+        body = {
+                "metadata": {
+                    "name": "name",
+                    "namespace": "namespace"
+                },
+                "spec": {
+                    "sqlstatements": ["select;"],
+                    "tables": ["table"]
+                },
+                "status": {
+                    "state": "RUNNING",
+                    "job_id": "job_id"
+                }
+        }
+        
+        patch = Bunch()
+        patch.status = {}
+        
+        beamsqltables = {}
+        
+        target.updates(beamsqltables, None, patch, Logger(), body, body["spec"], body["status"])
+        assert patch.status["state"] == "INITIALIZED"
+        assert patch.status["job_id"] == None
 class TestDeletion(TestCase):
     def update_status_nochange(body, patch, logger):
         pass
